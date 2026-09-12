@@ -112,6 +112,7 @@ jobs:
             -DBOARD_ROOT="$PWD/app"
 
       - name: "📦 Collect artifacts"
+        if: always()
         run: |
           cd zephyr-workspace
           mkdir -p app/Releases
@@ -121,17 +122,33 @@ jobs:
               cp -v "$src" "app/Releases/${ARTIFACT_NAME}.${ext}"
             fi
           done
+
+          # ---- 诊断产物 ----
+          # zephyr.dts: 合并后的成品设备树（查外设 status / 引脚占用）
+          src=$(find app/build -name "zephyr.dts" | head -1)
+          [ -n "$src" ] && cp -v "$src" app/Releases/diag-zephyr.dts
+
+          # .config: 最终生效的 Kconfig（查 PM / CLOCK / SPI 等开关）
+          src=$(find app/build -name ".config" -path '*/zephyr/*' | head -1)
+          [ -n "$src" ] && cp -v "$src" app/Releases/diag-dotconfig.txt
+
+          # devicetree_generated.h: 引脚/节点编号的最终展开
+          src=$(find app/build -name "devicetree_generated.h" | head -1)
+          [ -n "$src" ] && cp -v "$src" app/Releases/diag-devicetree_generated.h
+
           echo "--- Releases ---"
           ls -la app/Releases/
 
       - name: "💾 Upload artifact"
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: zephyr-workspace/app/Releases/*
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: "🔗 Publish to firmware branch (direct download)"
+        if: success()
         run: |
           cd zephyr-workspace/app
           git config user.name "github-actions[bot]"

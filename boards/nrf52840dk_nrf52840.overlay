@@ -1,8 +1,14 @@
+/*
+ * 自制 nRF52840 板（基于 nrf52840dk）
+ *
+ * 与原始版本相比的改动，用 [FIX-n] 标出，其余保持原样。
+ */
+
 &pwm0_default {
 	group1 {
 		psels = <NRF_PSEL(PWM_OUT0, 0, 13)>,
-			<NRF_PSEL(PWM_OUT1, 0, 14)>,
-			<NRF_PSEL(PWM_OUT2, 0, 15)>;
+				<NRF_PSEL(PWM_OUT1, 0, 14)>,
+				<NRF_PSEL(PWM_OUT2, 0, 15)>;
 		nordic,drive-mode = <NRF_DRIVE_D0S1>;
 		nordic,invert;
 	};
@@ -11,8 +17,8 @@
 &pwm0_sleep {
 	group1 {
 		psels = <NRF_PSEL(PWM_OUT0, 0, 13)>,
-			<NRF_PSEL(PWM_OUT1, 0, 14)>,
-			<NRF_PSEL(PWM_OUT2, 0, 15)>;
+				<NRF_PSEL(PWM_OUT1, 0, 14)>,
+				<NRF_PSEL(PWM_OUT2, 0, 15)>;
 	};
 };
 
@@ -28,33 +34,76 @@
 	};
 };
 
+/* ===== SPI3：IMU ===== */
+&spi3_default {
+	group1 {
+		psels = <NRF_PSEL(SPIM_MOSI, 0, 28)>,
+				<NRF_PSEL(SPIM_MISO, 1, 10)>,
+				<NRF_PSEL(SPIM_SCK, 0, 29)>;
+	};
+};
+
+&spi3_sleep {
+	group1 {
+		psels = <NRF_PSEL(SPIM_MOSI, 0, 28)>,
+				<NRF_PSEL(SPIM_MISO, 1, 10)>,
+				<NRF_PSEL(SPIM_SCK, 0, 29)>;
+		low-power-enable;
+	};
+};
+
+/*
+ * [FIX-4] 关掉 DK 基板 dts 里 status="okay" 的外设，它们的引脚和本板冲突：
+ *   &spi1  -> spi1_default: SCK = P0.31 (本板 CS), MOSI = P0.30 (本板 LED)
+ *   &qspi  -> P0.17~P0.23 + mx25r64 flash
+ *   &nfct  -> P0.09 / P0.10 被锁给 NFC 天线
+ * 本板都不用它们，全部关掉。
+ */
+&spi1 {
+	status = "disabled";
+};
+
+&qspi {
+	status = "disabled";
+};
+
+&nfct {
+	status = "disabled";
+};
+
 / {
 	chosen {
 		zephyr,console = &cdc_acm_uart0;
 		zephyr,shell-uart = &cdc_acm_uart0;
 	};
 
-	pwmleds {
-		pwm_led1: pwm_led_1 {
-			pwms = <&pwm0 1 PWM_MSEC(20) PWM_POLARITY_INVERTED>;
-		};
-		pwm_led2: pwm_led_2 {
-			pwms = <&pwm0 2 PWM_MSEC(20) PWM_POLARITY_INVERTED>;
-		};
-	};
-
 	battery-divider {
 		compatible = "voltage-divider";
 		status = "okay";
-		io-channels = <&adc 12>; // Measure VDDHDIV5
-		output-ohms = <1>;
-		full-ohms = <2>;
+		io-channels = <&adc 1>;    /* P0.03 / AIN1 */
+		output-ohms = <51000>;
+		full-ohms = <151000>;
+		power-gpios = <&gpio1 13 GPIO_ACTIVE_HIGH>;
 	};
 
-	aliases {
-		pwm-led1 = &pwm_led1;
-		pwm-led2 = &pwm_led2;
+	zephyr,user {
+		int0-gpios = <&gpio1 11 GPIO_ACTIVE_HIGH>;
+		led-gpios = <&gpio0 30 (GPIO_OPEN_DRAIN | GPIO_ACTIVE_LOW)>;
 	};
+};
+
+&button0 {
+	gpios = <&gpio1 9 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+};
+
+/*
+ * [FIX-2] 删掉原来的 &reg { regulator-initial-mode = <DCDC>; }
+ *   nRF52840 的 dtsi 只有 reg0 / reg1 两个标签，没有裸 `reg`（那是 nRF52832 的）。
+ *   而 reg1 = DCDC 已经由 DK 的 dts 设置好了，这里本来就不需要再写。
+ */
+
+&adc {
+	status = "okay";
 };
 
 &i2c0 {
@@ -63,21 +112,40 @@
 	zephyr,flash-buf-max-size = <1023>;
 	clock-frequency = <I2C_BITRATE_FAST>;
 
-	imu: imu@0 { // any address out of range (00, 7f, etc. will search all addresses and stored address first if available, specify an address here to search first otherwise
+	imu: imu@0 {
 		compatible = "i2c-device";
 		label = "imu";
 		reg = <0>;
+		/* [FIX-1b] 本板 IMU 在 SPI 上，I2C 上没有东西。禁用可跳过 I2C 扫描路径。 */
+		status = "disabled";
 	};
 
 	mag: mag@0 {
 		compatible = "i2c-device";
 		label = "mag";
 		reg = <0>;
+		/*
+		 * [FIX-1a] 关键修复。
+		 * interface.h:82  #if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
+		 *                   -> #define SENSOR_DIRECT_MAG_EXISTS true
+		 * 会让 sensor.c:291 / sensor.c:704 里两段代码参与编译，而那段代码调用的
+		 * sensor_imu->ext_passthrough() 已在 2026-08-15 (69f6434) 从 sensor.h 删除，
+		 * ext_setup() 的签名也从 1 参变成 3 参 —— 上游 main 至今没同步修。
+		 * 本板没有磁力计，禁用此节点即可绕开这个上游编译错误。
+		 */
+		status = "disabled";
 	};
-
 };
 
 &spi3 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	max-frequency = <DT_FREQ_M(32)>;
+	pinctrl-0 = <&spi3_default>;
+	pinctrl-1 = <&spi3_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio0 31 GPIO_ACTIVE_LOW>;
+
 	imu_spi: imu_spi@0 {
 		compatible = "vnd,spi-device";
 		spi-max-frequency = <DT_FREQ_M(32)>;
