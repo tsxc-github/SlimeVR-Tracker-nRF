@@ -1,0 +1,143 @@
+name: Build Tracker Firmware
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      board:
+        description: "Board target (e.g. nrf52840dk/nrf52840)"
+        required: true
+        default: "nrf52840dk/nrf52840"
+      artifact_name:
+        description: "Output file name (no extension)"
+        required: true
+        default: "SlimeNRF_nRF52840dk_Tracker"
+
+concurrency:
+  group: tracker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  ZEPHYR_SDK_VERSION: "0.16.9"
+  BOARD: ${{ inputs.board || 'nrf52840dk/nrf52840' }}
+  ARTIFACT_NAME: ${{ inputs.artifact_name || 'SlimeNRF_nRF52840dk_Tracker' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: "💻 Checkout repository"
+        uses: actions/checkout@v6
+        with:
+          path: zephyr-workspace/app
+          fetch-depth: 0
+
+      - name: "🧰 Install apt dependencies"
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: >-
+            git cmake ninja-build gperf ccache dfu-util device-tree-compiler wget
+            python3-dev python3-pip python3-setuptools python3-tk python3-wheel python3-venv
+            xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
+          version: 1.0
+
+      - name: "📦 Cache Zephyr SDK"
+        id: cache-sdk
+        uses: actions/cache@v5
+        with:
+          path: ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
+          key: zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
+
+      - name: "🪁 Download Zephyr SDK"
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${{ env.ZEPHYR_SDK_VERSION }}/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}_linux-x86_64_minimal.tar.xz"
+          tar xf "zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}_linux-x86_64_minimal.tar.xz" -C ~/
+
+      - name: "🪁 Register Zephyr SDK"
+        run: |
+          ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}/setup.sh -c -t arm-zephyr-eabi
+
+      - name: "🐍 Setup west venv"
+        run: |
+          python3 -m venv ~/.venv
+          ~/.venv/bin/pip install -q --upgrade pip
+          ~/.venv/bin/pip install -q west
+          echo "$HOME/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: "📦 Cache west workspace"
+        id: cache-west
+        uses: actions/cache@v5
+        with:
+          path: |
+            zephyr-workspace/.west
+            zephyr-workspace/zephyr
+            zephyr-workspace/nrf
+            zephyr-workspace/modules
+            zephyr-workspace/nrfxlib
+            zephyr-workspace/bootloader
+            zephyr-workspace/tools
+          key: west-${{ hashFiles('zephyr-workspace/app/west.yml') }}
+
+      - name: "♻️ Initialize west workspace"
+        run: |
+          cd zephyr-workspace
+          if [ ! -d .west ]; then
+            west init -l app
+          fi
+          west update --narrow -o=--depth=1
+          west zephyr-export
+
+      - name: "🐍 Install Zephyr python requirements"
+        run: |
+          cd zephyr-workspace
+          ~/.venv/bin/pip install -q -r zephyr/scripts/requirements.txt
+
+      - name: "🔨 Build firmware"
+        run: |
+          cd zephyr-workspace
+          rm -rf app/build
+          west build \
+            --board "${{ env.BOARD }}" \
+            --pristine=always app \
+            --build-dir app/build \
+            -- \
+            -DNCS_TOOLCHAIN_VERSION=NONE \
+            -DBOARD_ROOT="$PWD/app"
+
+      - name: "📦 Collect artifacts"
+        run: |
+          cd zephyr-workspace
+          mkdir -p app/Releases
+          for ext in hex uf2 bin; do
+            src=$(find app/build -name "zephyr.${ext}" -path '*/zephyr/*' | head -1)
+            if [ -n "$src" ]; then
+              cp -v "$src" "app/Releases/${ARTIFACT_NAME}.${ext}"
+            fi
+          done
+          echo "--- Releases ---"
+          ls -la app/Releases/
+
+      - name: "💾 Upload artifact"
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: zephyr-workspace/app/Releases/*
+          if-no-files-found: error
+
+      - name: "🔗 Publish to firmware branch (direct download)"
+        run: |
+          cd zephyr-workspace/app
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan firmware-tmp
+          git rm -rf --cached . > /dev/null 2>&1 || true
+          git add -f Releases/
+          git commit -q -m "firmware: ${ARTIFACT_NAME} @ ${GITHUB_SHA}" || echo "nothing to commit"
+          git push -f origin HEAD:refs/heads/firmware
