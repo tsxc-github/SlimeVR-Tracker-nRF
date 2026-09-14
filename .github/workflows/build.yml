@@ -150,11 +150,28 @@ jobs:
       - name: "🔗 Publish to firmware branch (direct download)"
         if: success()
         run: |
-          cd zephyr-workspace/app
+          set -e
+          REMOTE="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          cd "$GITHUB_WORKSPACE"
+          # work in a separate clone so we never fight the app checkout
+          if git clone -q --depth=1 --branch firmware "$REMOTE" fwpub 2>/dev/null; then
+            echo "firmware branch exists -- merging new files into it"
+          else
+            echo "no firmware branch yet -- creating it"
+            mkdir -p fwpub
+            cd fwpub
+            git init -q
+            git checkout -q -b firmware
+            git remote add origin "$REMOTE"
+            cd ..
+          fi
+          cd fwpub
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout --orphan firmware-tmp
-          git rm -rf --cached . > /dev/null 2>&1 || true
-          git add -f Releases/
+          mkdir -p Releases
+          cp -v "$GITHUB_WORKSPACE"/zephyr-workspace/app/Releases/* Releases/
+          git add -A
           git commit -q -m "firmware: ${ARTIFACT_NAME} @ ${GITHUB_SHA}" || echo "nothing to commit"
-          git push -f origin HEAD:refs/heads/firmware
+          git push -q origin HEAD:refs/heads/firmware
+          echo "--- published ---"
+          ls -la Releases/
