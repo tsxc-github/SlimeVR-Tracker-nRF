@@ -873,7 +873,9 @@ void sensor_loop(void)
 			int64_t loop_begin = k_uptime_ticks();
 #endif
 			// Resume devices
-			sys_interface_resume();
+			// [TEST] disabled: does the per-loop PM round-trip break SPI reads?
+			// nrfx_spim_uninit() + pinctrl sleep/default churn happens every loop.
+			// sys_interface_resume();
 
 			// Trigger reconfig on sensor mode change
 			bool reconfig = last_sensor_mode != sensor_mode;
@@ -951,7 +953,8 @@ void sensor_loop(void)
 			}
 
 			// Suspend devices
-			sys_interface_suspend();
+			// [TEST] disabled (paired with the resume above)
+			// sys_interface_suspend();
 
 			// Fuse all data
 			int g_count = 0;
