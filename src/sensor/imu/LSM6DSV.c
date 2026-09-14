@@ -224,6 +224,32 @@ uint16_t lsm_data_read(uint8_t *data, uint16_t len)
 	if (err)
 		LOG_ERR("Communication error");
 
+	/* ============ DIAG: brownout / CS discriminator ============
+	 * On a garbage read (both FIFO_STATUS bytes 0xFF = nobody driving MISO)
+	 * immediately read back WHO_AM_I and the config registers.
+	 *   who=70 CTRL1/CTRL2 = configured -> chip alive, this transaction glitched
+	 *   who=70 CTRL1/CTRL2 = 00         -> CHIP WAS RESET (brownout / power loss)
+	 *   who=FF                          -> whole bus dead at this instant (CS or power)
+	 * CTRL1/CTRL2 only return to 0x00 after a power-on reset, so they are a
+	 * reliable "did the chip lose power" probe.
+	 */
+	if (rawCount[0] == 0xFF && rawCount[1] == 0xFF)
+	{
+		static uint32_t nbad = 0;
+		if ((nbad++ % 8) == 0)
+		{
+			uint8_t w2 = 0, c1 = 0, c2 = 0, fc4 = 0, c3 = 0;
+			ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x0F, &w2);
+			ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x10, &c1);
+			ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x11, &c2);
+			ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x0A, &fc4);
+			ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x12, &c3);
+			LOG_WRN("DIAGBAD who=%02X CTRL1=%02X CTRL2=%02X FC4=%02X CTRL3=%02X",
+				w2, c1, c2, fc4, c3);
+		}
+	}
+	/* ========================================================== */
+
 	/* ================= DIAG ================= */
 	static uint32_t diag_n = 0;
 	if ((diag_n++ % 64) == 0)
