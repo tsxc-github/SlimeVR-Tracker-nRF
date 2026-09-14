@@ -829,7 +829,7 @@ void sensor_loop(void)
 			int64_t loop_begin = k_uptime_ticks();
 #endif
 			// Resume devices
-			sys_interface_resume();
+			// [TSXC-PROD] No longer PM-resumed here: see the note at the end of the loop.
 
 			// Trigger reconfig on sensor mode change
 			bool reconfig = last_sensor_mode != sensor_mode;
@@ -907,7 +907,32 @@ void sensor_loop(void)
 			}
 
 			// Suspend devices
-			sys_interface_suspend();
+			// [TSXC-PROD] No longer PM-suspended here: see the note below.
+
+			/*
+			 * [TSXC-PROD] Per-loop interface PM round-trip removed.
+			 *
+			 * Upstream suspends and resumes the IMU interface once per loop iteration
+			 * (~166 Hz at the default 6 ms update rate). With CONFIG_PM_DEVICE=y each
+			 * iteration does nrfx_spim_uninit() + pinctrl_apply_state(SLEEP), then a lazy
+			 * nrfx_spim_init() + pinctrl_apply_state(DEFAULT) on the next transfer.
+			 *
+			 * On this hardware that churn makes the SPI link fail intermittently: IMU
+			 * reads come back 0xFF (nothing driving MISO) or the IMU goes silent, which
+			 * showed up as
+			 *   "LSM6DSV: FIFO read buffer limit reached, 877 packets dropped"
+			 *   "Sensor interrupt timeout" / "No packets in buffer"
+			 * and finally a SYS_STATUS_SENSOR_ERROR restart loop.
+			 *
+			 * Dropping only these two calls makes the tracker run correctly.
+			 *
+			 * Power behaviour is unchanged where it matters: the interface is still
+			 * suspended in the paths that actually sleep (sensor_shutdown(),
+			 * sensor_setup_WOM()) and still resumed once before this loop starts, so
+			 * WOM / system-off current is not affected. Keeping SPIM initialised for the
+			 * whole run costs nothing measurable - the peripheral is only clocked while
+			 * a transfer is in flight.
+			 */
 
 			// Fuse all data
 			int g_count = 0;
